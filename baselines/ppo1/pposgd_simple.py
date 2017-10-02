@@ -119,6 +119,7 @@ def learn(env, policy_func, *,
 
     var_list = pi.get_trainable_variables()
     lossandgrad = U.function([ob, ac, atarg, ret, lrmult], losses + [U.flatgrad(total_loss, var_list)])
+    
     adam = MpiAdam(var_list, epsilon=adam_epsilon)
 
     assign_old_eq_new = U.function([],[], updates=[tf.assign(oldv, newv)
@@ -136,8 +137,12 @@ def learn(env, policy_func, *,
     timesteps_so_far = 0
     iters_so_far = 0
     tstart = time.time()
-    lenbuffer = deque(maxlen=100) # rolling buffer for episode lengths
-    rewbuffer = deque(maxlen=100) # rolling buffer for episode rewards
+    lenbuffer = deque(maxlen=50) # rolling buffer for episode lengths
+    rewbuffer = deque(maxlen=50) # rolling buffer for episode rewards
+
+    # Maithra edits: add lists to return logs
+    ep_lengths = []
+    ep_rewards = []
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0, max_seconds>0])==1, "Only one time constraint permitted"
 
@@ -183,6 +188,7 @@ def learn(env, policy_func, *,
                 *newlosses, g = lossandgrad(batch["ob"], batch["ac"], batch["atarg"], batch["vtarg"], cur_lrmult)
                 adam.update(g, optim_stepsize * cur_lrmult) 
                 losses.append(newlosses)
+
             logger.log(fmt_row(13, np.mean(losses, axis=0)))
 
         logger.log("Evaluating losses...")
@@ -203,6 +209,11 @@ def learn(env, policy_func, *,
         logger.record_tabular("EpLenMean", np.mean(lenbuffer))
         logger.record_tabular("EpRewMean", np.mean(rewbuffer))
         logger.record_tabular("EpThisIter", len(lens))
+
+        # Maithra edit: append intermediate results onto returned logs
+        ep_lengths.append(np.mean(lenbuffer))
+        ep_rewards.append(np.mean(rewbuffer))
+
         episodes_so_far += len(lens)
         timesteps_so_far += sum(lens)
         iters_so_far += 1
@@ -211,6 +222,9 @@ def learn(env, policy_func, *,
         logger.record_tabular("TimeElapsed", time.time() - tstart)
         if MPI.COMM_WORLD.Get_rank()==0:
             logger.dump_tabular()
+
+    #Maithra edit
+    return pi, [ep_lengths, ep_rewards]
 
 def flatten_lists(listoflists):
     return [el for list_ in listoflists for el in list_]

@@ -13,6 +13,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
     ac = env.action_space.sample() # not used, just so we have the datatype
     new = True # marks if we're on first timestep of an episode
     ob = env.reset()
+    label = env.env.labels()
 
     cur_ep_ret = 0 # return in current episode
     cur_ep_len = 0 # len of current episode
@@ -20,6 +21,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
     ep_lens = [] # lengths of ...
 
     # Initialize history arrays
+    labels = np.array([label for _ in range(horizon)])
     obs = np.array([ob for _ in range(horizon)])
     rews = np.zeros(horizon, 'float32')
     vpreds = np.zeros(horizon, 'float32')
@@ -34,7 +36,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
         # before returning segment [0, T-1] so we get the correct
         # terminal value
         if t > 0 and t % horizon == 0:
-            yield {"ob" : obs, "rew" : rews, "vpred" : vpreds, "new" : news,
+            yield {"label" : labels, "ob" : obs, "rew" : rews, "vpred" : vpreds, "new" : news,
                     "ac" : acs, "prevac" : prevacs, "nextvpred": vpred * (1 - new),
                     "ep_rets" : ep_rets, "ep_lens" : ep_lens}
             # Be careful!!! if you change the downstream algorithm to aggregate
@@ -42,6 +44,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
             ep_rets = []
             ep_lens = []
         i = t % horizon
+        labels[i] = label
         obs[i] = ob
         vpreds[i] = vpred
         news[i] = new
@@ -49,6 +52,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
         prevacs[i] = prevac
 
         ob, rew, new, _ = env.step(ac)
+        label = env.env.labels()
         rews[i] = rew
 
         cur_ep_ret += rew
@@ -59,6 +63,7 @@ def traj_segment_generator(pi, env, horizon, stochastic):
             cur_ep_ret = 0
             cur_ep_len = 0
             ob = env.reset()
+            label = env.env.labels()
         t += 1
 
 def add_vtarg_and_adv(seg, gamma, lam):
@@ -143,6 +148,9 @@ def learn(env, policy_func, *,
     # Maithra edits: add lists to return logs
     ep_lengths = []
     ep_rewards = []
+    ep_labels = []
+    ep_actions = []
+    ep_correct_actions = []
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0, max_seconds>0])==1, "Only one time constraint permitted"
 
@@ -170,7 +178,7 @@ def learn(env, policy_func, *,
         add_vtarg_and_adv(seg, gamma, lam)
 
         # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
-        ob, ac, atarg, tdlamret = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"]
+        ob, ac, atarg, tdlamret, label  = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"], seg["label"]
         vpredbefore = seg["vpred"] # predicted value function before udpate
         atarg = (atarg - atarg.mean()) / atarg.std() # standardized advantage function estimate
         d = Dataset(dict(ob=ob, ac=ac, atarg=atarg, vtarg=tdlamret), shuffle=not pi.recurrent)
@@ -213,6 +221,16 @@ def learn(env, policy_func, *,
         # Maithra edit: append intermediate results onto returned logs
         ep_lengths.append(np.mean(lenbuffer))
         ep_rewards.append(np.mean(rewbuffer))
+        ep_labels.append(label)
+        ep_actions.append(ac)
+        # compute mean of correct actions and append
+        count = 0
+        idxs = np.all((label == [1,1]), axis=1)
+        count += np.sum(idxs)
+        new_label = label[np.invert(idxs)]
+        new_ac = ac[np.invert(idxs)]
+        count += np.sum((new_ac == np.argmax(new_label, axis=1)))
+        ep_correct_actions.append(count/len(label))
 
         episodes_so_far += len(lens)
         timesteps_so_far += sum(lens)
@@ -224,7 +242,8 @@ def learn(env, policy_func, *,
             logger.dump_tabular()
 
     #Maithra edit
-    return pi, [ep_lengths, ep_rewards]
+    return pi, {"lengths": ep_lengths, "rewards" : ep_rewards, "labels" : ep_labels,
+                 "actions" : ep_actions, "correct_actions" : ep_correct_actions}
 
 def flatten_lists(listoflists):
     return [el for list_ in listoflists for el in list_]

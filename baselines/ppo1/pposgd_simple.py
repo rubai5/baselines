@@ -223,14 +223,16 @@ def learn(env, policy_func, *,
         ep_rewards.append(np.mean(rewbuffer))
         ep_labels.append(label)
         ep_actions.append(ac)
-        # compute mean of correct actions and append
+        # compute mean of correct actions and append, ignoring actions
+        # where either choice could be right
         count = 0
         idxs = np.all((label == [1,1]), axis=1)
-        count += np.sum(idxs)
+        # removing for now: count += np.sum(idxs)
         new_label = label[np.invert(idxs)]
         new_ac = ac[np.invert(idxs)]
         count += np.sum((new_ac == np.argmax(new_label, axis=1)))
-        ep_correct_actions.append(count/len(label))
+        # changing ep_correct_actions.append(count/len(label))
+        ep_correct_actions.append(count/(len(label) - np.sum(idxs)))
 
         episodes_so_far += len(lens)
         timesteps_so_far += sum(lens)

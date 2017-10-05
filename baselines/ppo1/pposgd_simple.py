@@ -151,6 +151,7 @@ def learn(env, policy_func, *,
     ep_labels = []
     ep_actions = []
     ep_correct_actions = []
+    ep_obs = []
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0, max_seconds>0])==1, "Only one time constraint permitted"
 
@@ -223,6 +224,7 @@ def learn(env, policy_func, *,
         ep_rewards.append(np.mean(rewbuffer))
         ep_labels.append(label)
         ep_actions.append(ac)
+        ep_obs.append(ob)
         # compute mean of correct actions and append, ignoring actions
         # where either choice could be right
         count = 0
@@ -245,7 +247,7 @@ def learn(env, policy_func, *,
 
     #Maithra edit
     return pi, {"lengths": ep_lengths, "rewards" : ep_rewards, "labels" : ep_labels,
-                 "actions" : ep_actions, "correct_actions" : ep_correct_actions}
+                 "actions" : ep_actions, "correct_actions" : ep_correct_actions, "obs": ep_obs}
 
 def flatten_lists(listoflists):
     return [el for list_ in listoflists for el in list_]

@@ -24,7 +24,7 @@ class ActWrapper(object):
             model_data, act_params = dill.load(f)
         act = deepq.build_act(**act_params)
         sess = U.make_session(num_cpu=num_cpu)
-        sess.__enter__()
+        #sess.__enter__()
         with tempfile.TemporaryDirectory() as td:
             arc_path = os.path.join(td, "packed.zip")
             with open(arc_path, "wb") as f:
@@ -166,7 +166,7 @@ def learn(env,
     # Create all the functions necessary to train the model
 
     sess = U.make_session(num_cpu=num_cpu)
-    sess.__enter__()
+    #sess.__enter__()
 
     def make_obs_ph(name):
         return U.BatchInput(env.observation_space.shape, name=name)

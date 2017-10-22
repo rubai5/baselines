@@ -47,7 +47,8 @@ class MlpPolicy(object):
         ac = U.switch(stochastic, self.pd.sample(), self.pd.mode())
         self._act = U.function([stochastic, ob], [ac, self.vpred])
         # Maithra edit
-        self._get_logits_and_act = U.function([stochastic, ob], [ac, self.pd.logits])
+        if not isinstance(ac_space, gym.spaces.Box):
+            self._get_logits_and_act = U.function([stochastic, ob], [ac, self.pd.logits])
     
     def get_logits_and_act(self, stochastic, ob):
         ac1, logits1 = self._get_logits_and_act(stochastic, ob[None])

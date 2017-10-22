@@ -7,6 +7,7 @@ from baselines.common.mpi_adam import MpiAdam
 from baselines.common.mpi_moments import mpi_moments
 from mpi4py import MPI
 from collections import deque
+from copy import deepcopy
 
 def traj_segment_generator(pi, env, horizon, stochastic):
     t = 0

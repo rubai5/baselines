@@ -7,6 +7,7 @@ from baselines.common.mpi_adam import MpiAdam
 from baselines.common.mpi_moments import mpi_moments
 from mpi4py import MPI
 from collections import deque
+from copy import deepcopy
 
 def traj_segment_generator(pi, env, horizon, stochastic):
     t = 0
@@ -222,9 +223,9 @@ def learn(env, policy_func, *,
         # Maithra edit: append intermediate results onto returned logs
         ep_lengths.append(np.mean(lenbuffer))
         ep_rewards.append(np.mean(rewbuffer))
-        ep_labels.append(label)
-        ep_actions.append(ac)
-        ep_obs.append(ob)
+        ep_labels.append(deepcopy(label))
+        ep_actions.append(deepcopy(ac))
+        ep_obs.append(deepcopy(ob))
         # compute mean of correct actions and append, ignoring actions
         # where either choice could be right
         count = 0

@@ -83,7 +83,7 @@ def add_vtarg_and_adv(seg, gamma, lam):
         gaelam[t] = lastgaelam = delta + gamma * lam * nonterminal * lastgaelam
     seg["tdlamret"] = seg["adv"] + seg["vpred"]
 
-def learn(env, policy_func, *,
+def learn(env, pi, oldpi, *,
         timesteps_per_batch, # timesteps per actor per update
         clip_param, entcoeff, # clipping parameter epsilon, entropy coeff
         optim_epochs, optim_stepsize, optim_batchsize,# optimization hypers
@@ -91,14 +91,15 @@ def learn(env, policy_func, *,
         max_timesteps=0, max_episodes=0, max_iters=0, max_seconds=0,  # time constraint
         callback=None, # you can do anything in the callback, since it takes locals(), globals()
         adam_epsilon=1e-5,
-        schedule='constant' # annealing for stepsize parameters (epsilon and adam)
+        schedule='constant', # annealing for stepsize parameters (epsilon and adam)
+        test_envs = [] # can add a list of test environment to collect rewards if needed
         ):
     # Setup losses and stuff
     # ----------------------------------------
     ob_space = env.observation_space
     ac_space = env.action_space
-    pi = policy_func("pi", ob_space, ac_space) # Construct network for new policy
-    oldpi = policy_func("oldpi", ob_space, ac_space) # Network for old policy
+    #pi = policy_func("pi", ob_space, ac_space) # Construct network for new policy
+    #oldpi = policy_func("oldpi", ob_space, ac_space) # Network for old policy
     atarg = tf.placeholder(dtype=tf.float32, shape=[None]) # Target advantage function (if applicable)
     ret = tf.placeholder(dtype=tf.float32, shape=[None]) # Empirical return
 
@@ -138,13 +139,19 @@ def learn(env, policy_func, *,
     # Prepare for rollouts
     # ----------------------------------------
     seg_gen = traj_segment_generator(pi, env, timesteps_per_batch, stochastic=True)
+    if test_envs:
+        test_gens = []
+        for test_env in test_envs:
+            test_gen = traj_segment_generator(pi, test_env, timesteps_per_batch, stochastic=True)
+            test_gens.append(test_gen)
 
     episodes_so_far = 0
     timesteps_so_far = 0
     iters_so_far = 0
     tstart = time.time()
-    lenbuffer = deque(maxlen=100) # rolling buffer for episode lengths
-    rewbuffer = deque(maxlen=100) # rolling buffer for episode rewards
+    lenbuffer = deque(maxlen=50) # rolling buffer for episode lengths
+    rewbuffer = deque(maxlen=50) # rolling buffer for episode rewards
+    test_rewbuffers = [deque(maxlen=50) for test_env in test_envs]
 
     # Maithra edits: add lists to return logs
     ep_lengths = []
@@ -153,6 +160,8 @@ def learn(env, policy_func, *,
     ep_actions = []
     ep_correct_actions = []
     ep_obs = []
+    # log results for test environment
+    ep_rewards_test = [[] for test_env in test_envs]
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0, max_seconds>0])==1, "Only one time constraint permitted"
 
@@ -177,10 +186,20 @@ def learn(env, policy_func, *,
         logger.log("********** Iteration %i ************"%iters_so_far)
 
         seg = seg_gen.__next__()
+        if test_envs:
+            segs_test = []
+            for test_gen in test_gens:
+                segs_test.append(test_gen.__next__())
         add_vtarg_and_adv(seg, gamma, lam)
 
         # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
         ob, ac, atarg, tdlamret, label  = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"], seg["label"]
+        if test_envs:
+            for i, seg_test in enumerate(segs_test):
+                test_rews = seg_test["ep_rets"]
+                test_rewbuffers[i].extend(test_rews)
+                ep_rewards_test[i].append(np.mean(test_rewbuffers[i]))
+
         vpredbefore = seg["vpred"] # predicted value function before udpate
         atarg = (atarg - atarg.mean()) / atarg.std() # standardized advantage function estimate
         d = Dataset(dict(ob=ob, ac=ac, atarg=atarg, vtarg=tdlamret), shuffle=not pi.recurrent)
@@ -226,6 +245,16 @@ def learn(env, policy_func, *,
         ep_labels.append(deepcopy(label))
         ep_actions.append(deepcopy(ac))
         ep_obs.append(deepcopy(ob))
+        # compute mean of correct actions and append, ignoring actions
+        # where either choice could be right
+        count = 0
+        idxs = np.all((label == [1,1]), axis=1)
+        # removing for now: count += np.sum(idxs)
+        new_label = label[np.invert(idxs)]
+        new_ac = ac[np.invert(idxs)]
+        count += np.sum((new_ac == np.argmax(new_label, axis=1)))
+        # changing ep_correct_actions.append(count/len(label))
+        ep_correct_actions.append(count/(len(label) - np.sum(idxs)))
 
         episodes_so_far += len(lens)
         timesteps_so_far += sum(lens)
@@ -238,7 +267,8 @@ def learn(env, policy_func, *,
 
     #Maithra edit
     return pi, {"lengths": ep_lengths, "rewards" : ep_rewards, "labels" : ep_labels,
-                 "actions" : ep_actions, "correct_actions" : ep_correct_actions, "obs": ep_obs}
+                 "actions" : ep_actions, "correct_actions" : ep_correct_actions, "obs": ep_obs,
+                 "test_rews": ep_rewards_test}
 
 def flatten_lists(listoflists):
     return [el for list_ in listoflists for el in list_]

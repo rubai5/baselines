@@ -5,6 +5,7 @@ import tensorflow as tf, numpy as np
 import time
 from baselines.common.mpi_adam import MpiAdam
 from baselines.common.mpi_moments import mpi_moments
+from baselines.ppo1 import pposgd_simple, pposgd_simple_attacker
 from mpi4py import MPI
 from collections import deque
 from copy import deepcopy
@@ -257,10 +258,15 @@ def core_train_att(env, pi, oldpi, pi_def, loss_names,
               gamma, lam,
               max_timesteps=0, max_episodes=0, max_iters=0, max_seconds=0,  # time constraint
               callback=None,
-              schedule='constant'):
+              schedule='constant',
+              test_envs=[]):
     # Prepare for rollouts
     # ----------------------------------------
     seg_gen = traj_segment_generator_att(pi, pi_def, env, timesteps_per_batch, stochastic=True)
+    if test_envs:
+       test_gens = [pposgd_simple_attacker.traj_segment_generator(pi, attenv, timesteps_per_batch,
+                    stochastic=True) for attenv in test_envs]
+
 
     episodes_so_far = 0
     timesteps_so_far = 0
@@ -268,7 +274,8 @@ def core_train_att(env, pi, oldpi, pi_def, loss_names,
     tstart = time.time()
     lenbuffer = deque(maxlen=50) # rolling buffer for episode lengths
     rewbuffer = deque(maxlen=50) # rolling buffer for episode rewards
-
+    testbuffers = [deque(maxlen=50) for attenv in test_envs]
+    
     # Maithra edits: add lists to return logs
     ep_lengths = []
     ep_rewards = []
@@ -278,6 +285,7 @@ def core_train_att(env, pi, oldpi, pi_def, loss_names,
     ep_obs = []
     ep_def_obs = []
     ep_def_actions = []
+    ep_test_rewards = [[] for attenv in test_envs]
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0, max_seconds>0])==1, "Only one time constraint permitted"
 
@@ -303,10 +311,19 @@ def core_train_att(env, pi, oldpi, pi_def, loss_names,
 
         seg = seg_gen.__next__()
         add_vtarg_and_adv(seg, gamma, lam)
+        if test_envs:
+           test_segs = [test_gen.__next__() for test_gen in test_gens]
 
         # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
         ob, ac, atarg, tdlamret, label, def_ob, def_ac  = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"], seg["label"], \
                                           seg["def_ob"], seg["def_ac"]
+        
+        if test_envs:
+            for i, test_seg in enumerate(test_segs):
+                test_rews = test_seg["ep_rets"]
+                testbuffers[i].extend(test_rews)
+                ep_test_rewards[i].append(np.mean(testbuffers[i]))        
+
         vpredbefore = seg["vpred"] # predicted value function before udpate
         atarg = (atarg - atarg.mean()) / atarg.std() # standardized advantage function estimate
         d = Dataset(dict(ob=ob, ac=ac, atarg=atarg, vtarg=tdlamret), shuffle=not pi.recurrent)
@@ -349,11 +366,11 @@ def core_train_att(env, pi, oldpi, pi_def, loss_names,
         # Maithra edit: append intermediate results onto returned logs
         ep_lengths.append(np.mean(lenbuffer))
         ep_rewards.append(np.mean(rewbuffer))
-        ep_labels.append(label)
-        ep_actions.append(ac)
-        ep_obs.append(ob)
-        ep_def_obs.append(def_ob)
-        ep_def_actions.append(def_ac)
+        ep_labels.append(deepcopy(label))
+        ep_actions.append(deepcopy(ac))
+        ep_obs.append(deepcopy(ob))
+        ep_def_obs.append(deepcopy(def_ob))
+        ep_def_actions.append(deepcopy(def_ac))
 
         episodes_so_far += len(lens)
         timesteps_so_far += sum(lens)
@@ -367,7 +384,7 @@ def core_train_att(env, pi, oldpi, pi_def, loss_names,
     #Maithra edit
     info_dict = {"lengths": ep_lengths, "rewards" : ep_rewards, "labels" : ep_labels,
                  "actions" : ep_actions, "correct_actions" : ep_correct_actions, "obs": ep_obs,
-                 "def_obs" : ep_def_obs, "def_actions" : ep_def_actions} 
+                 "def_obs" : ep_def_obs, "def_actions" : ep_def_actions, "test_rews" : ep_test_rewards} 
     return pi, oldpi, lossandgrad, adam, assign_old_eq_new, compute_losses, info_dict
 
 def core_train_def(env, pi, oldpi, env_att, pi_att, loss_names,
@@ -378,17 +395,21 @@ def core_train_def(env, pi, oldpi, env_att, pi_att, loss_names,
               gamma, lam,
               max_timesteps=0, max_episodes=0, max_iters=0, max_seconds=0,  # time constraint
               callback=None,
-              schedule='constant'):
+              schedule='constant', test_envs=[]):
     # Prepare for rollouts
     # ----------------------------------------
     seg_gen = traj_segment_generator_def(pi_att, pi, env_att, env, timesteps_per_batch, stochastic=True)
 
+    if test_envs:
+       test_gens = [pposgd_simple.traj_segment_generator(pi, attenv, timesteps_per_batch,
+                    stochastic=True) for attenv in test_envs]
     episodes_so_far = 0
     timesteps_so_far = 0
     iters_so_far = 0
     tstart = time.time()
     lenbuffer = deque(maxlen=50) # rolling buffer for episode lengths
     rewbuffer = deque(maxlen=50) # rolling buffer for episode rewards
+    testbuffers = [deque(maxlen=50) for test_env in test_envs]
 
     # Maithra edits: add lists to return logs
     ep_lengths = []
@@ -399,6 +420,7 @@ def core_train_def(env, pi, oldpi, env_att, pi_att, loss_names,
     ep_obs = []
     ep_att_obs = []
     ep_att_actions = []
+    ep_test_rewards = [[] for test_env in test_envs]
 
     assert sum([max_iters>0, max_timesteps>0, max_episodes>0, max_seconds>0])==1, "Only one time constraint permitted"
 
@@ -425,9 +447,19 @@ def core_train_def(env, pi, oldpi, env_att, pi_att, loss_names,
         seg = seg_gen.__next__()
         add_vtarg_and_adv(seg, gamma, lam)
 
+        if test_envs:
+           test_segs = [test_gen.__next__() for test_gen in test_gens]
+
         # ob, ac, atarg, ret, td1ret = map(np.concatenate, (obs, acs, atargs, rets, td1rets))
         ob, ac, atarg, tdlamret, label, att_ob, att_ac  = seg["ob"], seg["ac"], seg["adv"], seg["tdlamret"], seg["label"], \
                                           seg["att_ob"], seg["att_ac"]
+        
+        if test_envs:
+            for i, test_seg in enumerate(test_segs):
+                test_rews = test_seg["ep_rets"]
+                testbuffers[i].extend(test_rews)
+                ep_test_rewards[i].append(np.mean(testbuffers[i])) 
+       
         vpredbefore = seg["vpred"] # predicted value function before udpate
         atarg = (atarg - atarg.mean()) / atarg.std() # standardized advantage function estimate
         d = Dataset(dict(ob=ob, ac=ac, atarg=atarg, vtarg=tdlamret), shuffle=not pi.recurrent)
@@ -470,11 +502,11 @@ def core_train_def(env, pi, oldpi, env_att, pi_att, loss_names,
         # Maithra edit: append intermediate results onto returned logs
         ep_lengths.append(np.mean(lenbuffer))
         ep_rewards.append(np.mean(rewbuffer))
-        ep_labels.append(label)
-        ep_actions.append(ac)
-        ep_obs.append(ob)
-        ep_att_obs.append(att_ob)
-        ep_att_actions.append(att_ac)
+        ep_labels.append(deepcopy(label))
+        ep_actions.append(deepcopy(ac))
+        ep_obs.append(deepcopy(ob))
+        ep_att_obs.append(deepcopy(att_ob))
+        ep_att_actions.append(deepcopy(att_ac))
         # compute mean of correct actions and append, ignoring actions
         # where either choice could be right
         count = 0
@@ -497,7 +529,7 @@ def core_train_def(env, pi, oldpi, env_att, pi_att, loss_names,
     
     info_dict = {"lengths": ep_lengths, "rewards" : ep_rewards, "labels" : ep_labels,
                  "actions" : ep_actions, "correct_actions" : ep_correct_actions, "obs": ep_obs,
-                  "att_actions" : ep_att_actions, "att_obs" : ep_att_obs}   
+                  "att_actions" : ep_att_actions, "att_obs" : ep_att_obs, "test_rews" : ep_test_rewards}   
     #Maithra edit
     return pi, oldpi, lossandgrad, adam, assign_old_eq_new, compute_losses, info_dict
 

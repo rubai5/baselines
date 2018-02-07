@@ -1,6 +1,7 @@
 import os.path as osp
 import gym
 import time
+import collections
 import joblib
 import logging
 import numpy as np
@@ -44,6 +45,7 @@ class Model(object):
         loss = pg_loss - entropy*ent_coef + vf_loss * vf_coef
 
         params = find_trainable_variables("model")
+        param_names = [param.name for param in params]
         grads = tf.gradients(loss, params)
         if max_grad_norm is not None:
             grads, grad_norm = tf.clip_by_global_norm(grads, max_grad_norm)
@@ -69,8 +71,7 @@ class Model(object):
 
         def save(save_path):
             ps = sess.run(params)
-            make_path(save_path)
-            joblib.dump(ps, save_path)
+            joblib.dump([param_names, ps], save_path)
 
         def load(load_path):
             loaded_params = joblib.load(load_path)
@@ -91,25 +92,27 @@ class Model(object):
 
 class Runner(object):
 
-    def __init__(self, env, model, nsteps=5, nstack=4, gamma=0.99):
+    def __init__(self, env, model, nsteps=5, nstack=1, gamma=0.99):
         self.env = env
         self.model = model
-        nh, nw, nc = env.observation_space.shape
+        K = env.observation_space.shape[0]
         nenv = env.num_envs
-        self.batch_ob_shape = (nenv*nsteps, nh, nw, nc*nstack)
-        self.obs = np.zeros((nenv, nh, nw, nc*nstack), dtype=np.uint8)
+        self.batch_ob_shape = (nenv*nsteps, K*nstack)
+        self.obs = np.zeros((nenv, K*nstack), dtype=np.float32)
         obs = env.reset()
         self.update_obs(obs)
         self.gamma = gamma
         self.nsteps = nsteps
         self.states = model.initial_state
         self.dones = [False for _ in range(nenv)]
+        self.episode_returns = collections.deque(maxlen=100)
 
     def update_obs(self, obs):
         # Do frame-stacking here instead of the FrameStack wrapper to reduce
         # IPC overhead
-        self.obs = np.roll(self.obs, shift=-1, axis=3)
-        self.obs[:, :, :, -1] = obs[:, :, :, 0]
+        #self.obs = np.roll(self.obs, shift=-1, axis=3)
+        self.obs = np.copy(obs)
+        #self.obs[:, -1] = obs[:, 0]
 
     def run(self):
         mb_obs, mb_rewards, mb_actions, mb_values, mb_dones = [],[],[],[],[]
@@ -121,6 +124,7 @@ class Runner(object):
             mb_values.append(values)
             mb_dones.append(self.dones)
             obs, rewards, dones, _ = self.env.step(actions)
+            self.episode_returns.extend([rew for rew in rewards if rew != 0])
             self.states = states
             self.dones = dones
             for n, done in enumerate(dones):
@@ -151,9 +155,9 @@ class Runner(object):
         mb_actions = mb_actions.flatten()
         mb_values = mb_values.flatten()
         mb_masks = mb_masks.flatten()
-        return mb_obs, mb_states, mb_rewards, mb_masks, mb_actions, mb_values
+        return mb_obs, mb_states, mb_rewards, mb_masks, mb_actions, mb_values, np.mean(self.episode_returns)
 
-def learn(policy, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, lr=7e-4, lrschedule='linear', epsilon=1e-5, alpha=0.99, gamma=0.99, log_interval=100):
+def learn(policy, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, lr=7e-4, lrschedule='linear', epsilon=1e-5, alpha=0.99, gamma=0.99, log_interval=100, plot_state=None):
     tf.reset_default_graph()
     set_global_seeds(seed)
 
@@ -168,7 +172,7 @@ def learn(policy, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), vf_c
     nbatch = nenvs*nsteps
     tstart = time.time()
     for update in range(1, total_timesteps//nbatch+1):
-        obs, states, rewards, masks, actions, values = runner.run()
+        obs, states, rewards, masks, actions, values, avg_episode = runner.run()
         policy_loss, value_loss, policy_entropy = model.train(obs, states, rewards, masks, actions, values)
         nseconds = time.time()-tstart
         fps = int((update*nbatch)/nseconds)
@@ -180,8 +184,13 @@ def learn(policy, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), vf_c
             logger.record_tabular("policy_entropy", float(policy_entropy))
             logger.record_tabular("value_loss", float(value_loss))
             logger.record_tabular("explained_variance", float(ev))
+            logger.record_tabular("average episode reward", avg_episode)
             logger.dump_tabular()
+            if plot_state:
+                plot_state.rewards.append(avg_episode)
+                plot_state.steps.append(update*nbatch)
     env.close()
+    return model
 
 if __name__ == '__main__':
     main()

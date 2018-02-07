@@ -57,6 +57,19 @@ def fc(x, scope, nh, act=tf.nn.relu, init_scale=1.0):
         h = act(z)
         return h
 
+def log_fc(x, scope, nh, act=tf.nn.relu):
+    # Identical to fc, except we constrain the matrix weights to be positive.
+    # Take exponential of the raw variable.
+    with tf.variable_scope(scope):
+        nin = x.get_shape()[1].value
+        # No ortho init (doesn't make sense with exponentials)
+        log_w = tf.get_variable("log_w", [nin, nh])
+        w = tf.exp(log_w)
+        b = tf.get_variable("b", [nh], initializer=tf.constant_initializer(0.0))
+        z = tf.matmul(x, w)+b
+        h = act(z)
+        return h
+
 def batch_to_seq(h, nbatch, nsteps, flat=False):
     if flat:
         h = tf.reshape(h, [nbatch, nsteps])
